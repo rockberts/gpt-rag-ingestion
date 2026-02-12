@@ -473,9 +473,132 @@ class SharePointMetadataStreamer:
                         readers.append(uid)
         return readers
 
+
+    def stream_site_pages_metadata(
+        self,
+        site_domain: str,
+        site_name: str,
+        sub_site_name: Optional[str] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Stream Site Pages metadata from SharePoint.
+        Yields one page at a time with its metadata.
+        """
+        if self._are_required_variables_missing():
+            return
+        
+        self.site_id, _ = self._get_site_and_drive_ids(site_domain, site_name, sub_site_name, drive_name="Documents")
+        
+        if not self.site_id:
+            return None
+
+        self._msgraph_auth()
+
+        try:
+            yield from self._stream_pages(self.site_id)
+        except Exception as e:
+            logging.error(f"[sharepoint] Error retrieving site pages: {e}")
+
+    def _stream_pages(
+        self,
+        site_id: str,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        Helper to recursively traverse and yield site pages metadata.
+        """
+        next_url = f"{self.graph_uri}/v1.0/sites/{site_id}/pages"
+        page_count = 0
+
+        while next_url:
+            logging.info(f"[sharepoint] Fetching site pages: {next_url}")
+            resp = self._make_ms_graph_request(next_url)
+
+            for item in resp.get("value", []):
+                page_count += 1
+                if page_count % 10 == 0:
+                    logging.info(
+                        ORANGE + f"[sharepoint] Retrieved {page_count} site pages so far" + RESET
+                    )
+
+                logging.info(
+                    GREEN + f"[sharepoint] Retrieved site page: {item.get('name', 'Unknown')}" + RESET
+                )
+
+                yield item
+
+            next_url = resp.get('@odata.nextLink')
+
+    def get_site_pages_metadata(
+        self,
+        site_domain: str,
+        site_name: str,
+        sub_site_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all Site Pages metadata for a SharePoint site.
+        Returns a list of all pages with their metadata.
+        """
+        results: List[Dict[str, Any]] = []
+        
+        try:
+            for page in self.stream_site_pages_metadata(site_domain, site_name, sub_site_name):
+                metadata = self._extract_site_page_metadata(page)
+                results.append(metadata)
+        except Exception as e:
+            logging.error(f"[sharepoint] Error getting site pages metadata: {e}")
+        
+        return results
+
+    def _extract_site_page_metadata(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract relevant metadata from a Site Page object.
+        """
+        def z(dt: str) -> str:
+            return dt if dt.endswith('Z') else dt + 'Z'
+        
+        return {
+            'id': data.get('id'),
+            'name': data.get('name'),
+            'title': data.get('title'),
+            'description': data.get('description'),
+            'source': data.get('webUrl'),
+            'created_by': data.get('createdBy', {}).get('user', {}).get('displayName'),
+            'created_datetime': z(data.get('createdDateTime', '')) if data.get('createdDateTime') else None,
+            'last_modified_by': data.get('lastModifiedBy', {}).get('user', {}).get('displayName'),
+            'last_modified_datetime': z(data.get('lastModifiedDateTime', '')) if data.get('lastModifiedDateTime') else None,
+            'published_by': data.get('publishedBy', {}).get('user', {}).get('displayName'),
+            'parent_section': data.get('parentSection', {}).get('displayName'),
+        }
+
+    def get_site_page_content(
+        self,
+        site_id: str,
+        page_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Get the HTML content of a specific Site Page.
+        """
+        url = f"{self.graph_uri}/v1.0/sites/{site_id}/pages/{page_id}"
+        
+        try:
+            resp = self._make_ms_graph_request(url)
+            return {
+                'id': resp.get('id'),
+                'name': resp.get('name'),
+                'title': resp.get('title'),
+                'content_html': resp.get('webPartData'),  # or you can use 'content' depending on API version
+                'source': resp.get('webUrl'),
+                'full_response': resp
+            }
+        except Exception as e:
+            logging.error(f"[sharepoint] Error getting site page content for {page_id}: {e}")
+            return {}
+
+
     def _are_required_variables_missing(self) -> bool:
         missing = [v for v in [self.tenant_id, self.client_id, self.client_secret, self.authority] if not v]
         if missing:
             logging.error("[sharepoint] Missing required credentials.")
             return True
         return False
+
